@@ -596,6 +596,15 @@ impl From<bool> for Value {
     }
 }
 
+impl From<&bool> for Value {
+    fn from(value: &bool) -> Self {
+        Self {
+            inner: ValueInner::Boolean(*value),
+            ty: ResolvedType::boolean(),
+        }
+    }
+}
+
 impl From<UIntValue> for Value {
     fn from(value: UIntValue) -> Self {
         Self {
