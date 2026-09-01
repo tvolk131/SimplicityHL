@@ -15,6 +15,7 @@ pub mod named;
 pub mod num;
 pub mod parse;
 pub mod pattern;
+pub mod perf;
 pub mod resolution;
 pub mod source;
 pub mod unstable;
@@ -112,7 +113,9 @@ impl TemplateProgram {
         };
 
         // TODO: Add multierror to analyze
-        match ast::Program::analyze(&resolved_program, jet_hinter.clone_box()) {
+        match crate::perf::stage("analyze", || {
+            ast::Program::analyze(&resolved_program, jet_hinter.clone_box())
+        }) {
             Ok(simfony) => Ok(Self {
                 simfony,
                 file,
@@ -211,11 +214,13 @@ impl TemplateProgram {
             return Err(diagnostics.to_string());
         }
 
-        let commit = self.simfony.compile(
-            arguments,
-            include_debug_symbols,
-            self.jet_hinter.clone_box(),
-        )?;
+        let commit = crate::perf::stage("codegen", || {
+            self.simfony.compile(
+                arguments,
+                include_debug_symbols,
+                self.jet_hinter.clone_box(),
+            )
+        })?;
 
         Ok(CompiledProgram {
             debug_symbols: self.simfony.debug_symbols(self.file.as_ref()),
@@ -366,9 +371,13 @@ impl CompiledProgram {
             return Err(diagnostics.to_string());
         }
 
-        let mut simplicity_redeem = named::populate_witnesses(&self.simplicity, witness_values)?;
+        let mut simplicity_redeem = crate::perf::stage("witness", || {
+            named::populate_witnesses(&self.simplicity, witness_values)
+        })?;
         if let Some(env) = env {
-            simplicity_redeem = simplicity_redeem.prune(env).map_err(|e| e.to_string())?;
+            simplicity_redeem = crate::perf::stage("prune", || {
+                simplicity_redeem.prune(env).map_err(|e| e.to_string())
+            })?;
         }
         Ok(SatisfiedProgram {
             simplicity: simplicity_redeem,

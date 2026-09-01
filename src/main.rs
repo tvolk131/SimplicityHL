@@ -4,6 +4,7 @@ use clap::{Arg, ArgAction, Command};
 
 use simplicityhl::ast::ElementsJetHinter;
 use simplicityhl::error::should_color;
+use simplicityhl::perf;
 use simplicityhl::version::SimcDirective;
 use simplicityhl::{
     resolution::DependencyMapBuilder, source::CanonPath, source::CanonSourceFile, AbiMeta,
@@ -43,6 +44,19 @@ impl fmt::Display for Output {
         }
         Ok(())
     }
+}
+
+/// Print the per-stage timing report collected by [`perf`] to stderr.
+///
+/// Stages nest: `driver:build-graph` contains `lex`/`parse`, `serialize`
+/// contains `witness`/`prune`.
+fn print_stage_report(start: std::time::Instant) {
+    let report = perf::take_report();
+    eprintln!("Stage timing (SIMC_TIMING):");
+    for (stage, duration) in report {
+        eprintln!("  {stage:<22} {duration:>12?}");
+    }
+    eprintln!("  {:<22} {:>12?}", "total (compile)", start.elapsed());
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -124,6 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let matches = command.get_matches();
+    let timing_total = perf::enabled().then(std::time::Instant::now);
 
     let prog_file = matches.get_one::<String>("prog_file").unwrap();
     let main_path = CanonPath::canonicalize(Path::new(prog_file))?;
@@ -274,23 +289,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let (program_bytes, witness_bytes) = match witness_opt {
-        Some(witness) => {
-            let satisfied = match compiled.satisfy(witness) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
-            };
+    let satisfied = match witness_opt {
+        Some(witness) => match compiled.satisfy(witness) {
+            Ok(satisfied) => Some(satisfied),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+
+    // `serialize` nests the `witness` stage when a witness was provided.
+    let (program_bytes, witness_bytes) = perf::stage("serialize", || match &satisfied {
+        Some(satisfied) => {
             let (program_bytes, witness_bytes) = satisfied.redeem().to_vec_with_witness();
             (program_bytes, Some(witness_bytes))
         }
-        None => {
-            let program_bytes = compiled.commit().to_vec_without_witness();
-            (program_bytes, None)
-        }
-    };
+        None => (compiled.commit().to_vec_without_witness(), None),
+    });
 
     let abi_opt = if abi_param {
         Some(compiled.generate_abi_meta()?)
@@ -306,6 +323,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cmr: cmr_hex,
         compiler_version: compiled.compiler_version(),
     };
+
+    if let Some(start) = timing_total {
+        print_stage_report(start);
+    }
 
     if output_json {
         #[cfg(not(feature = "serde"))]

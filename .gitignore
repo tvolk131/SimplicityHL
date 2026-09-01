@@ -22,3 +22,6 @@ book/book/
 
 # macOS
 .DS_Store
+
+# dhat heap profile output (written to the CWD by `just bench-mem`)
+dhat-heap.json

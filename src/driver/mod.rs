@@ -139,7 +139,11 @@ impl SourceMap {
 ///   `A` if `A` depends on `B`).
 /// * **Cycle Detection:** Preventing infinite compiler loops by ensuring no circular
 ///   imports exist before heavy semantic processing begins.
-pub(crate) struct DependencyGraph {
+///
+/// The struct is public so external tooling (the LSP, the benchmark suite)
+/// can run the driver stage in isolation through [`DependencyGraph::build_program`];
+/// its fields remain private.
+pub struct DependencyGraph {
     /// Implements the Arena Pattern to act as the sole, centralized owner of all parsed modules.
     ///
     /// In C++ or Java, a graph would typically link dependencies using direct memory
@@ -199,14 +203,18 @@ impl DependencyGraph {
         dependency_map: Arc<DependencyMap>,
         unstable_features: &UnstableFeatures,
     ) -> (Option<parse::Program>, DiagnosticManager) {
-        let (graph, mut diagnostics) =
-            Self::build_graph(root_source, dependency_map, unstable_features);
+        // `driver:build-graph` nests the per-file `lex`/`parse` entries.
+        let (graph, mut diagnostics) = crate::perf::stage("driver:build-graph", || {
+            Self::build_graph(root_source, dependency_map, unstable_features)
+        });
 
         let Some(graph) = graph else {
             return (None, diagnostics);
         };
 
-        let program = graph.linearize_and_assemble(&mut diagnostics);
+        let program = crate::perf::stage("driver:assemble", || {
+            graph.linearize_and_assemble(&mut diagnostics)
+        });
         diagnostics.with_sources(graph.sources);
         (program, diagnostics)
     }

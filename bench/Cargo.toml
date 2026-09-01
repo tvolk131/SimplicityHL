@@ -1,0 +1,34 @@
+[package]
+name = "simplicityhl-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Benchmark corpus and per-stage profiling harnesses for the SimplicityHL compiler."
+
+# This crate is excluded from the root workspace (see the root Cargo.toml) on
+# purpose: its dev-dependencies (criterion, dhat) must never affect the root
+# Cargo.lock, which CI checks with `cargo rbmt --lock-file existing`, or the
+# library's MSRV. Run everything through `--manifest-path bench/Cargo.toml`
+# (or the `just bench*` recipes).
+
+[dependencies]
+simplicityhl = { path = ".." }
+dhat = "0.3"
+serde_json = "1"
+
+[dev-dependencies]
+criterion = "0.5"
+chumsky = "0.11.2"
+
+[[bench]]
+name = "stages"
+harness = false
+
+# Keep debug symbols in release/bench builds so profilers (samply, cargo
+# flamegraph, Instruments) attribute frames when run through `cargo run
+# --release` or `cargo bench`.
+[profile.release]
+debug = true
+
+[profile.bench]
+debug = true

@@ -1818,13 +1818,16 @@ impl<A: AstNode> ParseFromStrWithErrors for A {
 
         let start = pipeline::directive_prescan(content, file_id, diagnostics)?;
 
-        let (tokens, lex_errs) = crate::lexer::lex(file_id, content, start);
+        let (tokens, lex_errs) =
+            crate::perf::stage("lex", || crate::lexer::lex(file_id, content, start));
 
         let lex_ok = pipeline::is_lex_ok(lex_errs, diagnostics)?;
 
         let tokens = tokens?;
 
-        let (ast, parse_status) = pipeline::parse_ast::<A>(file_id, content, tokens, diagnostics);
+        let (ast, parse_status) = crate::perf::stage("parse", || {
+            pipeline::parse_ast::<A>(file_id, content, tokens, diagnostics)
+        });
 
         if lex_ok && parse_status {
             let () = pipeline::post_check(unstable_features, ast.as_ref(), diagnostics);

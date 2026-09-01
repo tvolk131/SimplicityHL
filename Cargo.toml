@@ -53,7 +53,10 @@ getrandom = { version = "0.2", features = ["js"] }
 
 [workspace]
 members = ["codegen", "fuzz", "external-jet-lib-example"]
-exclude = ["bitcoind-tests"]
+# `bench` keeps its own lockfile and dev-dependencies (criterion, dhat) so they
+# never affect the root lockfile or the MSRV checks; same pattern as
+# `bitcoind-tests`.
+exclude = ["bench", "bitcoind-tests"]
 
 [workspace.metadata.rbmt.toolchains]
 nightly = "nightly-2025-08-23"

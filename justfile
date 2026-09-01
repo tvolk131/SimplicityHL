@@ -90,3 +90,21 @@ build_wasm:
 clean:
     rm -rf target
     rm -rf fuzz/target
+
+# Run performance benchmarks (criterion). Filter by group or bench id, e.g.
+#   just bench
+#   just bench lex
+#   just bench "codegen/for_while:2"
+# See bench/README.md for baselines and profiling workflows.
+bench *args:
+    cargo bench --manifest-path bench/Cargo.toml --bench stages {{args}}
+
+# Materialize the generated benchmark corpus to bench/corpus for external
+# profilers and `simc` runs; --check verifies the corpus still compiles.
+bench-corpus *args:
+    cargo run --manifest-path bench/Cargo.toml --release --bin corpus-gen -- {{args}}
+
+# Profile per-stage heap usage with dhat, one stage per process.
+#   just bench-mem for_while:2 codegen
+bench-mem spec stage:
+    cargo run --manifest-path bench/Cargo.toml --release --bin mem-stage -- {{spec}} {{stage}}
