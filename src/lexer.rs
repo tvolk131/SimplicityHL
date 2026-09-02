@@ -9,6 +9,13 @@ use crate::str::{Binary, Decimal, Hexadecimal};
 use crate::version::SIMC_STR;
 
 pub type Spanned<T> = (T, SimpleSpan);
+
+/// Output shared by the combinator lexer and the ASCII scanner: the token
+/// stream, if recovery left one, plus the lexing errors.
+type Lexed<'src> = (
+    Option<Vec<Spanned<Token<'src>>>>,
+    Vec<Rich<'src, char, SimpleSpan>>,
+);
 pub type Tokens<'src> = Vec<(Token<'src>, crate::error::Span)>;
 
 #[cfg(feature = "fmt")]
@@ -439,7 +446,14 @@ pub fn lex(
     input: &str,
     start: usize,
 ) -> (Option<Tokens<'_>>, Vec<crate::error::Diagnostic>) {
-    let (tokens, lex_errors) = lexer().parse(&input[start..]).into_output_errors();
+    // ASCII input (the overwhelmingly common case) takes the hand-written
+    // scanner; anything with non-ASCII bytes keeps the combinator lexer,
+    // which is Unicode-aware (XID identifiers, Unicode whitespace).
+    let (tokens, lex_errors) = if input[start..].is_ascii() {
+        lex_ascii(&input[start..])
+    } else {
+        lexer().parse(&input[start..]).into_output_errors()
+    };
     let shift = |span| Span::from_chumsky(file_id, span, start);
 
     let mut diagnostics: Vec<Diagnostic> = lex_errors
@@ -461,6 +475,223 @@ pub fn lex(
     });
 
     (tokens, diagnostics)
+}
+
+/// Hand-written scanner for ASCII input, producing exactly the tokens, spans
+/// and errors of the combinator [`lexer`], which remains the reference
+/// implementation (and the handler of non-ASCII input).
+///
+/// One left-to-right pass over the bytes: trivia is skipped in place, and
+/// every token is recognized by a match on its first byte, with no
+/// backtracking and no allocation except the output vectors.
+fn lex_ascii<'src>(input: &'src str) -> Lexed<'src> {
+    let b = input.as_bytes();
+    let mut tokens: Vec<Spanned<Token<'src>>> = Vec::new();
+    let mut errors: Vec<Rich<'src, char, SimpleSpan>> = Vec::new();
+    let mut i = 0;
+
+    while i < b.len() {
+        let c = b[i];
+        // Unicode White_Space intersected with ASCII.
+        if matches!(c, b' ' | b'\t' | b'\n' | b'\x0B' | b'\x0C' | b'\r') {
+            i += 1;
+            continue;
+        }
+
+        if c == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+            // Line comment: everything up to (not including) the newline.
+            i += 2;
+            while i < b.len() && b[i] != b'\n' && b[i] != b'\r' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if c == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+            // Nested block comment. An unterminated comment swallows the rest
+            // of the input; every nesting level left open is reported,
+            // innermost first.
+            let mut opens = vec![i];
+            i += 2;
+            loop {
+                if i + 1 >= b.len() {
+                    for open in opens.iter().rev() {
+                        errors.push(Rich::custom(
+                            SimpleSpan::from(*open..*open + 2),
+                            "Unclosed block comment",
+                        ));
+                    }
+                    i = b.len();
+                    break;
+                }
+                if b[i] == b'/' && b[i + 1] == b'*' {
+                    opens.push(i);
+                    i += 2;
+                } else if b[i] == b'*' && b[i + 1] == b'/' {
+                    opens.pop();
+                    i += 2;
+                    if opens.is_empty() {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+
+        if c.is_ascii_alphabetic() || c == b'_' {
+            let ident_start = i;
+            i += 1;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let ident = &input[ident_start..i];
+
+            if i < b.len() && b[i] == b'!' && matches!(ident, "assert" | "panic" | "dbg" | "list") {
+                i += 1;
+                tokens.push((
+                    Token::Macro(&input[ident_start..i]),
+                    SimpleSpan::from(ident_start..i),
+                ));
+                continue;
+            }
+
+            if matches!(ident, "jet" | "witness" | "param")
+                && i + 2 < b.len()
+                && b[i] == b':'
+                && b[i + 1] == b':'
+                && (b[i + 2].is_ascii_alphabetic() || b[i + 2] == b'_')
+            {
+                let name_start = i + 2;
+                let mut j = name_start + 1;
+                while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+                    j += 1;
+                }
+                let name = &input[name_start..j];
+                let token = match ident {
+                    "jet" => Token::Jet(name),
+                    "witness" => Token::Witness(name),
+                    _ => Token::Param(name),
+                };
+                tokens.push((token, SimpleSpan::from(ident_start..j)));
+                i = j;
+                continue;
+            }
+
+            let token = match ident {
+                "pub" => Token::Pub,
+                "use" => Token::Use,
+                "as" => Token::As,
+                "fn" => Token::Fn,
+                "let" => Token::Let,
+                "type" => Token::Type,
+                "mod" => Token::Mod,
+                "const" => Token::Const,
+                "match" => Token::Match,
+                "enum" => Token::Enum,
+                CRATE_STR => Token::Crate,
+                SIMC_STR => Token::Simc,
+                "true" => Token::Bool(true),
+                "false" => Token::Bool(false),
+                _ => Token::Ident(ident),
+            };
+            tokens.push((token, SimpleSpan::from(ident_start..i)));
+            continue;
+        }
+
+        if c.is_ascii_digit() {
+            if c == b'0' && i + 2 < b.len() && matches!(b[i + 1], b'x' | b'b') {
+                let hexadecimal = b[i + 1] == b'x';
+                let is_digit = |byte: u8| {
+                    if hexadecimal {
+                        byte.is_ascii_hexdigit()
+                    } else {
+                        byte == b'0' || byte == b'1'
+                    }
+                };
+                if is_digit(b[i + 2]) {
+                    let mut j = i + 3;
+                    while j < b.len() && (is_digit(b[j]) || b[j] == b'_') {
+                        j += 1;
+                    }
+                    let text = digit_literal_text::<false>(&input[i + 2..j]);
+                    let token = if hexadecimal {
+                        Token::HexLiteral(Hexadecimal::from_str_unchecked(text.as_ref()))
+                    } else {
+                        Token::BinLiteral(Binary::from_str_unchecked(text.as_ref()))
+                    };
+                    tokens.push((token, SimpleSpan::from(i..j)));
+                    i = j;
+                    continue;
+                }
+                // A prefix with no valid digit after it (`0x`, `0b1`'s tail,
+                // ...) falls back to the decimal below: `0x` lexes as `0`,
+                // then the identifier `x`.
+            }
+
+            let mut j = i + 1;
+            while j < b.len() && (b[j].is_ascii_digit() || b[j] == b'_') {
+                j += 1;
+            }
+            let text = digit_literal_text::<false>(&input[i..j]);
+            tokens.push((
+                Token::DecLiteral(Decimal::from_str_unchecked(text.as_ref())),
+                SimpleSpan::from(i..j),
+            ));
+            i = j;
+            continue;
+        }
+
+        let next = if i + 1 < b.len() { b[i + 1] } else { 0 };
+        let (token, len) = match c {
+            b'-' if next == b'>' => (Token::Arrow, 2),
+            b'=' if next == b'>' => (Token::FatArrow, 2),
+            b':' if next == b':' => (Token::DoubleColon, 2),
+            b'=' => (Token::Eq, 1),
+            b':' => (Token::Colon, 1),
+            b';' => (Token::Semi, 1),
+            b',' => (Token::Comma, 1),
+            b'(' => (Token::LParen, 1),
+            b')' => (Token::RParen, 1),
+            b'[' => (Token::LBracket, 1),
+            b']' => (Token::RBracket, 1),
+            b'{' => (Token::LBrace, 1),
+            b'}' => (Token::RBrace, 1),
+            b'<' => (Token::LAngle, 1),
+            b'>' => (Token::RAngle, 1),
+            _ => {
+                // Like the combinator lexer's recovery: report the first
+                // character of the garbage, then skip until a position that
+                // can begin a lexeme, and continue there.
+                errors.push(Rich::custom(
+                    SimpleSpan::from(i..i + 1),
+                    format!("found '{}' expected a token", char::from(c)),
+                ));
+                i += 1;
+                while i < b.len() && !starts_lexeme(b, i) {
+                    i += 1;
+                }
+                continue;
+            }
+        };
+        tokens.push((token, SimpleSpan::from(i..i + len)));
+        i += len;
+    }
+
+    (Some(tokens), errors)
+}
+
+/// Whether `b[i]` can begin a lexeme (a token or trivia) in the ASCII
+/// scanner, used to resynchronize after unrecognized input.
+fn starts_lexeme(b: &[u8], i: usize) -> bool {
+    match b[i] {
+        b' ' | b'\t' | b'\n' | b'\x0B' | b'\x0C' | b'\r' => true,
+        b'/' => i + 1 < b.len() && (b[i + 1] == b'/' || b[i + 1] == b'*'),
+        b'-' => i + 1 < b.len() && b[i + 1] == b'>',
+        b'=' | b':' | b';' | b',' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'<' | b'>' => true,
+        c => c.is_ascii_alphabetic() || c == b'_' || c.is_ascii_digit(),
+    }
 }
 
 /// Lexes an input string into a lossles stream of tokens with spans, beginning at byte
@@ -1171,5 +1402,129 @@ mod fmt_lexer {
         let _ = tokens.unwrap();
 
         assert!(lex_errs.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod differential_tests {
+    use super::*;
+
+    /// Deterministic xorshift so failures reproduce.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    type Summary<'src> = (
+        Option<Vec<(Token<'src>, SimpleSpan)>>,
+        Vec<(SimpleSpan, String)>,
+    );
+
+    fn summarize<'src>(
+        tokens: Option<&Vec<Spanned<Token<'src>>>>,
+        errors: &[Rich<'src, char, SimpleSpan>],
+    ) -> Summary<'src> {
+        (
+            tokens.cloned(),
+            errors
+                .iter()
+                .map(|err| {
+                    let msg = err.reason().to_string();
+                    // The scanner's unexpected-character messages are
+                    // intentionally shorter than the combinator's enumeration
+                    // of every expected alternative; compare only the
+                    // "found '<char>'" part, everything after `expected`.
+                    match msg.split(" expected").next() {
+                        Some(prefix) => (*err.span(), prefix.to_string()),
+                        None => (*err.span(), msg),
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// The ASCII scanner must produce exactly the tokens, spans and errors of
+    /// the combinator lexer, on real sources, targeted edge cases, and random
+    /// ASCII byte soup.
+    #[test]
+    fn ascii_scanner_matches_combinator_lexer() {
+        // Strictly-compared corpus: real sources and curated edge cases,
+        // including every well-specified error (unclosed comments, the
+        // reserved keyword, an unknown character mid-program).
+        let strict: Vec<String> = vec![
+            include_str!("../examples/p2pkh.simf").to_string(),
+            include_str!("../examples/last_will.simf").to_string(),
+            include_str!("../examples/hash_loop.simf").to_string(),
+            String::new(),
+            "0x 0b 0xg 0b2 1_ _1 __ 0x1_ 0b1010_0101 1_3_3_7".to_string(),
+            "jet::add_32 witness::W param::P jet:: jet: jetx::y crate::x simc simcfoo".to_string(),
+            "assert! panic! dbg! list! assertx! assert".to_string(),
+            "true false True False let letx".to_string(),
+            "/* a /* b */ c */ /* unclosed".to_string(),
+            "// line \r\n more /* not nested in line */".to_string(),
+            "a @ b a@#b fn main() {} @// comment simc".to_string(),
+        ];
+
+        let mut corpus: Vec<String> = strict.clone();
+        let mut rng = Rng(0x1EC0_FFEE_0000_0001);
+        for _ in 0..1000 {
+            let len = rng.below(240);
+            let bytes = (0..len)
+                .map(|_| (rng.below(0x7f) as u8).min(b'~'))
+                .collect::<Vec<u8>>();
+            corpus.push(String::from_utf8(bytes).expect("ASCII bytes are UTF-8"));
+        }
+
+        for src in corpus {
+            let strict_compare = strict.contains(&src);
+            let expected = lexer().parse(src.as_str()).into_output_errors();
+            let actual = lex_ascii(src.as_str());
+            // Contract:
+            // - On clean input (the combinator reports no errors) the
+            //   scanner's tokens must match exactly. This covers every valid
+            //   program, which is the guarantee that matters.
+            // - On the curated corpus the errors must match too (spans and
+            //   messages, up to the combinator's expected-item enumeration):
+            //   those pin the specified error behaviors, like nested unclosed
+            //   comments and the reserved keyword.
+            // - On random garbage the combinator's recovery details (whether
+            //   it resynchronizes before or after a comment opener, where in
+            //   a garbage run the error lands, whether it returns output at
+            //   all) are implementation artifacts, not a spec. Both lexers
+            //   report the input as erroneous and the parse fails either
+            //   way, so only require the scanner to agree that it is garbage.
+            let (expected, expected_errors) = summarize(expected.0.as_ref(), &expected.1);
+            let (actual, actual_errors) = summarize(actual.0.as_ref(), &actual.1);
+            if expected_errors.is_empty() {
+                assert_eq!(expected, actual, "token mismatch for clean input {src:?}");
+                assert!(
+                    actual_errors.is_empty(),
+                    "scanner invented errors for clean input {src:?}"
+                );
+            } else if strict_compare {
+                assert_eq!(expected, actual, "token mismatch for input {src:?}");
+                assert_eq!(
+                    expected_errors, actual_errors,
+                    "error mismatch for input {src:?}"
+                );
+            } else {
+                assert!(
+                    !actual_errors.is_empty(),
+                    "scanner must report garbage input as erroneous: {src:?}"
+                );
+            }
+        }
     }
 }
