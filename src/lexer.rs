@@ -1490,41 +1490,266 @@ mod differential_tests {
         for src in corpus {
             let strict_compare = strict.contains(&src);
             let expected = lexer().parse(src.as_str()).into_output_errors();
-            let actual = lex_ascii(src.as_str());
-            // Contract:
-            // - On clean input (the combinator reports no errors) the
-            //   scanner's tokens must match exactly. This covers every valid
-            //   program, which is the guarantee that matters.
-            // - On the curated corpus the errors must match too (spans and
-            //   messages, up to the combinator's expected-item enumeration):
-            //   those pin the specified error behaviors, like nested unclosed
-            //   comments and the reserved keyword.
-            // - On random garbage the combinator's recovery details (whether
-            //   it resynchronizes before or after a comment opener, where in
-            //   a garbage run the error lands, whether it returns output at
-            //   all) are implementation artifacts, not a spec. Both lexers
-            //   report the input as erroneous and the parse fails either
-            //   way, so only require the scanner to agree that it is garbage.
-            let (expected, expected_errors) = summarize(expected.0.as_ref(), &expected.1);
-            let (actual, actual_errors) = summarize(actual.0.as_ref(), &actual.1);
-            if expected_errors.is_empty() {
-                assert_eq!(expected, actual, "token mismatch for clean input {src:?}");
-                assert!(
-                    actual_errors.is_empty(),
-                    "scanner invented errors for clean input {src:?}"
-                );
-            } else if strict_compare {
-                assert_eq!(expected, actual, "token mismatch for input {src:?}");
-                assert_eq!(
-                    expected_errors, actual_errors,
-                    "error mismatch for input {src:?}"
-                );
-            } else {
-                assert!(
-                    !actual_errors.is_empty(),
-                    "scanner must report garbage input as erroneous: {src:?}"
-                );
+            let candidates: [(&str, Lexed); 2] = [
+                ("scanner", lex_ascii(src.as_str())),
+                ("logos", crate::lexer::logos_lexer::lex(src.as_str())),
+            ];
+            for (name, actual) in candidates {
+                let actual = actual;
+                // Contract:
+                // - On clean input (the combinator reports no errors) the
+                //   scanner's tokens must match exactly. This covers every valid
+                //   program, which is the guarantee that matters.
+                // - On the curated corpus the errors must match too (spans and
+                //   messages, up to the combinator's expected-item enumeration):
+                //   those pin the specified error behaviors, like nested unclosed
+                //   comments and the reserved keyword.
+                // - On random garbage the combinator's recovery details (whether
+                //   it resynchronizes before or after a comment opener, where in
+                //   a garbage run the error lands, whether it returns output at
+                //   all) are implementation artifacts, not a spec. Both lexers
+                //   report the input as erroneous and the parse fails either
+                //   way, so only require the scanner to agree that it is garbage.
+                let (expected, expected_errors) = summarize(expected.0.as_ref(), &expected.1);
+                let (actual, actual_errors) = summarize(actual.0.as_ref(), &actual.1);
+                if expected_errors.is_empty() {
+                    assert_eq!(expected, actual, "token mismatch for clean input {src:?}");
+                    assert!(
+                        actual_errors.is_empty(),
+                        "scanner invented errors for clean input {src:?}"
+                    );
+                } else if strict_compare {
+                    assert_eq!(expected, actual, "token mismatch for input {src:?}");
+                    assert_eq!(
+                        expected_errors, actual_errors,
+                        "error mismatch for input {src:?}"
+                    );
+                } else {
+                    assert!(
+                        !actual_errors.is_empty(),
+                        "{name} lexer must report garbage input as erroneous: {src:?}"
+                    );
+                }
             }
         }
+    }
+}
+
+/// Experimental: a logos-based ASCII lexer, built to compare against the
+/// hand-written scanner on the try/logos-lexer branch. Same role, same
+/// output shape (`Lexed`), same differential oracle applies.
+pub mod logos_lexer {
+    use super::*;
+    use logos::{Lexer, Logos};
+
+    /// Errors recorded by token callbacks (nested block comments).
+    #[derive(Default)]
+    pub struct Extras {
+        pub errors: Vec<(SimpleSpan, String)>,
+    }
+
+    #[derive(Logos, Clone, Debug, PartialEq)]
+    #[logos(extras = Extras)]
+    #[logos(skip(r"[ \t\n\x0B\x0C\r]+"))]
+    #[logos(skip(r"//[^\r\n]*"))]
+    enum AsciiToken<'src> {
+        /// Nested `/* ... */` block comment; the callback walks the nesting.
+        #[regex(r"/\*", block_comment)]
+        BlockComment,
+
+        /// Identifier, keyword, or boolean literal; resolved by the wrapper.
+        #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
+        Ident(&'src str),
+
+        #[token("assert!")]
+        #[token("panic!")]
+        #[token("dbg!")]
+        #[token("list!")]
+        Macro(&'src str),
+
+        /// `jet::`/`witness::`/`param::` path; the wrapper re-slices the name.
+        #[regex(r"(jet|witness|param)::[a-zA-Z_][a-zA-Z0-9_]*")]
+        Path,
+
+        #[regex(r"[0-9][0-9_]*", decimal)]
+        Dec(Decimal),
+
+        #[regex(r"0x[0-9a-fA-F][0-9a-fA-F_]*", hexadecimal)]
+        Hex(Hexadecimal),
+
+        #[regex(r"0b[01][01_]*", binary)]
+        Bin(Binary),
+
+        #[token("->")]
+        Arrow,
+        #[token("=>")]
+        FatArrow,
+        #[token("=")]
+        Eq,
+        #[token("::")]
+        DoubleColon,
+        #[token(":")]
+        Colon,
+        #[token(";")]
+        Semi,
+        #[token(",")]
+        Comma,
+        #[token("(")]
+        LParen,
+        #[token(")")]
+        RParen,
+        #[token("[")]
+        LBracket,
+        #[token("]")]
+        RBracket,
+        #[token("{")]
+        LBrace,
+        #[token("}")]
+        RBrace,
+        #[token("<")]
+        LAngle,
+        #[token(">")]
+        RAngle,
+    }
+
+    fn decimal<'src>(lex: &mut Lexer<'src, AsciiToken<'src>>) -> Decimal {
+        Decimal::from_str_unchecked(digit_literal_text::<false>(lex.slice()).as_ref())
+    }
+
+    fn hexadecimal<'src>(lex: &mut Lexer<'src, AsciiToken<'src>>) -> Hexadecimal {
+        let digits = &lex.slice()[2..]; // drop the 0x prefix
+        Hexadecimal::from_str_unchecked(digit_literal_text::<false>(digits).as_ref())
+    }
+
+    fn binary<'src>(lex: &mut Lexer<'src, AsciiToken<'src>>) -> Binary {
+        let digits = &lex.slice()[2..]; // drop the 0b prefix
+        Binary::from_str_unchecked(digit_literal_text::<false>(digits).as_ref())
+    }
+
+    /// Consume a nested block comment; on an unterminated one, consume to
+    /// the end and record one error per open nesting level, innermost first.
+    fn block_comment<'src>(lex: &mut Lexer<'src, AsciiToken<'src>>) {
+        let b = lex.source().as_bytes();
+        let mut opens = vec![lex.span().start];
+        let mut i = lex.span().end;
+        loop {
+            if i + 1 >= b.len() {
+                for open in opens.iter().rev() {
+                    lex.extras.errors.push((
+                        SimpleSpan::from(*open..*open + 2),
+                        "Unclosed block comment".to_string(),
+                    ));
+                }
+                i = b.len();
+                break;
+            }
+            if b[i] == b'/' && b[i + 1] == b'*' {
+                opens.push(i);
+                i += 2;
+            } else if b[i] == b'*' && b[i + 1] == b'/' {
+                opens.pop();
+                i += 2;
+                if opens.is_empty() {
+                    break;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        // The pattern already consumed the opening `/*`; bump only what the
+        // callback itself walked past it.
+        let consumed = i - lex.span().end;
+        lex.bump(consumed);
+    }
+
+    fn keyword_or_ident(text: &str) -> Token {
+        match text {
+            "pub" => Token::Pub,
+            "use" => Token::Use,
+            "as" => Token::As,
+            "fn" => Token::Fn,
+            "let" => Token::Let,
+            "type" => Token::Type,
+            "mod" => Token::Mod,
+            "const" => Token::Const,
+            "match" => Token::Match,
+            "enum" => Token::Enum,
+            CRATE_STR => Token::Crate,
+            SIMC_STR => Token::Simc,
+            "true" => Token::Bool(true),
+            "false" => Token::Bool(false),
+            _ => Token::Ident(text),
+        }
+    }
+
+    pub fn lex(input: &str) -> Lexed {
+        let mut lexer = AsciiToken::lexer_with_extras(input, Extras::default());
+        let mut tokens = Vec::new();
+        // Logos reports one error per skipped character; coalesce adjacent
+        // ones into a single error per garbage run, like the other lexers.
+        let mut last_error_end: Option<usize> = None;
+        while let Some(result) = lexer.next() {
+            let span = SimpleSpan::from(lexer.span().start..lexer.span().end);
+            match result {
+                Ok(AsciiToken::BlockComment) => {}
+                Ok(AsciiToken::Ident(text)) => tokens.push((keyword_or_ident(text), span)),
+                Ok(AsciiToken::Macro(text)) => tokens.push((Token::Macro(text), span)),
+                Ok(AsciiToken::Path) => {
+                    let text = &input[span.start..span.end];
+                    let name = &text[text.find("::").expect("regex matched a prefix") + 2..];
+                    let token = match &text[..3] {
+                        "jet" => Token::Jet(name),
+                        "wit" => Token::Witness(name),
+                        _ => Token::Param(name),
+                    };
+                    tokens.push((token, span));
+                }
+                Ok(AsciiToken::Dec(v)) => tokens.push((Token::DecLiteral(v), span)),
+                Ok(AsciiToken::Hex(v)) => tokens.push((Token::HexLiteral(v), span)),
+                Ok(AsciiToken::Bin(v)) => tokens.push((Token::BinLiteral(v), span)),
+                Ok(token) => {
+                    let token = match token {
+                        AsciiToken::Arrow => Token::Arrow,
+                        AsciiToken::FatArrow => Token::FatArrow,
+                        AsciiToken::Eq => Token::Eq,
+                        AsciiToken::DoubleColon => Token::DoubleColon,
+                        AsciiToken::Colon => Token::Colon,
+                        AsciiToken::Semi => Token::Semi,
+                        AsciiToken::Comma => Token::Comma,
+                        AsciiToken::LParen => Token::LParen,
+                        AsciiToken::RParen => Token::RParen,
+                        AsciiToken::LBracket => Token::LBracket,
+                        AsciiToken::RBracket => Token::RBracket,
+                        AsciiToken::LBrace => Token::LBrace,
+                        AsciiToken::RBrace => Token::RBrace,
+                        AsciiToken::LAngle => Token::LAngle,
+                        AsciiToken::RAngle => Token::RAngle,
+                        _ => unreachable!("payload variants handled above"),
+                    };
+                    tokens.push((token, span));
+                }
+                Err(()) => {
+                    let found = input[span.start..].chars().next().expect("nonempty span");
+                    let error_end = span.start + found.len_utf8();
+                    if last_error_end != Some(span.start) {
+                        let errors = &mut lexer.extras.errors;
+                        errors.push((
+                            SimpleSpan::from(span.start..error_end),
+                            format!("found '{found}' expected a token"),
+                        ));
+                    }
+                    last_error_end = Some(error_end);
+                }
+            }
+        }
+        let errors = lexer
+            .extras
+            .errors
+            .iter()
+            .map(|(span, msg)| Rich::custom(*span, msg.clone()));
+        // Block-comment errors are appended after stream errors; an
+        // unterminated comment always swallows the rest of the input, so its
+        // errors are last in encounter order either way.
+        (Some(tokens), errors.collect())
     }
 }
