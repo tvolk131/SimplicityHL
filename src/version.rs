@@ -21,7 +21,6 @@
 use std::ops::Range;
 use std::sync::OnceLock;
 
-use chumsky::Parser;
 use semver::{Version, VersionReq};
 
 use crate::error::{Error, Span};
@@ -159,16 +158,11 @@ impl SimcDirective {
         })
     }
 
-    /// Byte offset of the first content after leading whitespace and comments, using
-    /// the lexer's shared [`trivia`](crate::lexer::trivia) recognizer so the scanner
-    /// and the lexer agree on comment syntax.
+    /// Byte offset of the first content after leading whitespace and comments,
+    /// using the lexer's shared skipper so the scanner and the lexer agree on
+    /// comment syntax.
     fn skip_trivia(content: &str) -> usize {
-        crate::lexer::trivia()
-            .to_slice()
-            .lazy()
-            .parse(content)
-            .into_output()
-            .map_or(0, str::len)
+        crate::lexer::skip_trivia(content)
     }
 }
 
