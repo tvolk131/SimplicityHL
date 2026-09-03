@@ -308,10 +308,12 @@ fn digit_literal_text<const PRESERVE: bool>(input: &str) -> std::borrow::Cow<'_,
 
 fn to_token<'src, const PRESERVE: bool>(
 ) -> impl Parser<'src, &'src str, Token<'src>, extra::Err<Rich<'src, char, SimpleSpan>>> {
-    let num = digits_with_underscores(10).map(|s: &str| {
-        let text = digit_literal_text::<PRESERVE>(s);
-        Token::DecLiteral(Decimal::from_str_unchecked(text.as_ref()))
-    });
+    let num = || {
+        digits_with_underscores(10).map(|s: &str| {
+            let text = digit_literal_text::<PRESERVE>(s);
+            Token::DecLiteral(Decimal::from_str_unchecked(text.as_ref()))
+        })
+    };
     let hex = just("0x")
         .ignore_then(digits_with_underscores(16))
         .map(|s: &str| {
@@ -359,25 +361,50 @@ fn to_token<'src, const PRESERVE: bool>(
         .ignore_then(text::ident())
         .map(Token::Param);
 
+    // Ordered by prefix constraints (=> before =, :: before :) and then by
+    // source frequency, so common tokens are matched early.
     let op = choice((
-        just("->").to(Token::Arrow),
         just("=>").to(Token::FatArrow),
-        just("=").to(Token::Eq),
         just("::").to(Token::DoubleColon),
-        just(":").to(Token::Colon),
+        just("->").to(Token::Arrow),
         just(";").to(Token::Semi),
-        just(",").to(Token::Comma),
         just("(").to(Token::LParen),
         just(")").to(Token::RParen),
-        just("[").to(Token::LBracket),
-        just("]").to(Token::RBracket),
+        just(":").to(Token::Colon),
         just("{").to(Token::LBrace),
         just("}").to(Token::RBrace),
+        just(",").to(Token::Comma),
+        just("=").to(Token::Eq),
+        just("[").to(Token::LBracket),
+        just("]").to(Token::RBracket),
         just("<").to(Token::LAngle),
         just(">").to(Token::RAngle),
     ));
 
-    choice((jet, witness, param, macros, hex, bin, num, keyword, op))
+    // First-character dispatch: route each input to only the alternatives
+    // that can start with its first character, instead of trying every
+    // alternative against every input. Non-ASCII characters join the
+    // identifier group, where `text::ident` decides XID validity.
+    let alpha = any()
+        .filter(|c: &char| c.is_ascii_alphabetic() || *c == '_' || !c.is_ascii())
+        .rewind()
+        .ignore_then(choice((jet, witness, param, macros, keyword)));
+    let nonzero_digit = any()
+        .filter(|c: &char| c.is_ascii_digit() && *c != '0')
+        .rewind()
+        .ignore_then(num());
+    let zero = just('0').rewind().ignore_then(choice((hex, bin, num())));
+    let punct = any()
+        .filter(|c: &char| {
+            matches!(
+                c,
+                '-' | '=' | ':' | ';' | ',' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
+            )
+        })
+        .rewind()
+        .ignore_then(op);
+
+    choice((alpha, punct, nonzero_digit, zero))
 }
 
 pub fn lexer<'src>(
