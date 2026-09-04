@@ -42,6 +42,12 @@ type ProgNode<'brand> = Arc<named::ConstructNode<'brand>>;
 struct Scope<'brand> {
     /// The live bindings: their patterns, name index and scope boundaries.
     bindings: ScopeBindings,
+    /// Materialized variable selectors, keyed by identifier: (binding index,
+    /// depth built at, selector). Repeated reads of the same variable share
+    /// the cached selector and extend it lazily with one `drop` wrap per new
+    /// binding, instead of re-walking the whole environment product each
+    /// time; the emitted take/drop sequence is identical to a fresh build.
+    selector_cache: HashMap<Identifier, (usize, usize, PairBuilder<ProgNode<'brand>>)>,
     ctx: simplicity::types::Context<'brand>,
     /// Tracker of function calls.
     call_tracker: Arc<CallTracker>,
@@ -69,6 +75,7 @@ impl<'brand> Scope<'brand> {
     ) -> Self {
         Self {
             bindings: ScopeBindings::from_root(BasePattern::Ignore),
+            selector_cache: HashMap::new(),
             ctx,
             call_tracker,
             arguments,
@@ -81,6 +88,7 @@ impl<'brand> Scope<'brand> {
     pub fn child(&self, input: Pattern) -> Self {
         Self {
             bindings: ScopeBindings::from_root(BasePattern::from(&input)),
+            selector_cache: HashMap::new(),
             ctx: self.ctx.shallow_clone(),
             call_tracker: Arc::clone(&self.call_tracker),
             arguments: self.arguments.clone(),
@@ -104,6 +112,7 @@ impl<'brand> Scope<'brand> {
     /// The stack is empty.
     pub fn pop_scope(&mut self) {
         self.bindings.pop_scope();
+        self.selector_cache.clear();
     }
 
     /// Push an assignment to the current scope.
@@ -160,7 +169,7 @@ impl<'brand> Scope<'brand> {
     /// ```
     ///
     /// The expression `drop (IOH & OH)` returns the seeked value.
-    pub fn get(&self, target: &BasePattern) -> Option<PairBuilder<ProgNode<'brand>>> {
+    pub fn get(&mut self, target: &BasePattern) -> Option<PairBuilder<ProgNode<'brand>>> {
         match target {
             BasePattern::Identifier(identifier) => self.get_identifier(identifier),
             // No caller passes anything but an identifier today.
@@ -185,11 +194,34 @@ impl<'brand> Scope<'brand> {
     /// [`scope_tests`]), so the compiled program is unchanged; only the
     /// work to produce it shrinks from O(live bindings) per access to
     /// O(distance from the binding).
-    fn get_identifier(&self, identifier: &Identifier) -> Option<PairBuilder<ProgNode<'brand>>> {
-        let bindings = self.bindings.as_slice();
+    fn get_identifier(&mut self, identifier: &Identifier) -> Option<PairBuilder<ProgNode<'brand>>> {
         let index = self.bindings.position_of(identifier)?;
-        let newer_bindings = bindings.len() - 1 - index;
+        let newer_bindings = self.bindings.as_slice().len() - 1 - index;
 
+        // Cache hit: same binding still in effect, built at a depth we can
+        // extend with plain `drop` wraps (the take/drop sequence of a fresh
+        // build at the current depth). A stale depth (scope popped past it)
+        // or a re-bound identifier falls through to a fresh build.
+        let cache_hit = self
+            .selector_cache
+            .get(identifier)
+            .filter(|&&(cached_index, cached_depth, _)| {
+                cached_index == index && cached_depth <= newer_bindings
+            })
+            .map(|(_, _, cached)| cached.clone());
+        if let Some(mut selector) = cache_hit {
+            let cached_depth = self.selector_cache[identifier].1;
+            for _ in cached_depth..newer_bindings {
+                selector = selector.drop_();
+            }
+            self.selector_cache.insert(
+                identifier.clone(),
+                (index, newer_bindings, selector.clone()),
+            );
+            return Some(selector);
+        }
+
+        let binding = self.bindings.as_slice()[index].clone();
         let mut selector = SelectorBuilder::<ProgNode<'brand>>::default();
         for _ in 0..newer_bindings {
             selector = selector.i();
@@ -200,8 +232,12 @@ impl<'brand> Scope<'brand> {
             0 => selector,
             _ => selector.o(),
         };
-        let selector = bindings[index].get_from(selector, identifier)?;
-        Some(selector.h(&self.ctx))
+        let selector = binding.get_from(selector, identifier)?.h(&self.ctx);
+        self.selector_cache.insert(
+            identifier.clone(),
+            (index, newer_bindings, selector.clone()),
+        );
+        Some(selector)
     }
 
     /// Access the Simplicity type inference context.
