@@ -22,6 +22,7 @@ use std::ops::Range;
 use std::sync::OnceLock;
 
 use chumsky::Parser;
+use chumsky::{error::Simple, span::SimpleSpan};
 use semver::{Version, VersionReq};
 
 use crate::error::{Error, Span};
@@ -163,7 +164,7 @@ impl SimcDirective {
     /// the lexer's shared [`trivia`](crate::lexer::trivia) recognizer so the scanner
     /// and the lexer agree on comment syntax.
     fn skip_trivia(content: &str) -> usize {
-        crate::lexer::trivia()
+        crate::lexer::trivia::<chumsky::extra::Err<Simple<char, SimpleSpan>>>()
             .to_slice()
             .lazy()
             .parse(content)

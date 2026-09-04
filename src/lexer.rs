@@ -1,7 +1,15 @@
 use std::fmt;
 
 use chumsky::prelude::{any, choice, end, just, recursive, skip_then_retry_until};
-use chumsky::{error::Rich, extra, span::SimpleSpan, text, IterParser, Parser};
+use chumsky::{
+    error::{Rich, Simple},
+    extra::{self, ParserExtra},
+    label::LabelError,
+    span::SimpleSpan,
+    text,
+    text::TextExpected,
+    IterParser, Parser,
+};
 
 use crate::driver::CRATE_STR;
 use crate::error::{Diagnostic, Error, Span};
@@ -211,9 +219,29 @@ impl<'src> fmt::Display for FmtToken<'src> {
     }
 }
 
+/// The one lexing error that carries a custom message, constructible for
+/// either error type: bare for [`Simple`], with a reason for [`Rich`].
+pub trait LexError<'src>: Sized {
+    fn unclosed_block_comment(span: SimpleSpan) -> Self;
+}
+
+impl<'src> LexError<'src> for Simple<'src, char, SimpleSpan> {
+    fn unclosed_block_comment(span: SimpleSpan) -> Self {
+        Self::new(None, span)
+    }
+}
+
+impl<'src> LexError<'src> for Rich<'src, char, SimpleSpan> {
+    fn unclosed_block_comment(span: SimpleSpan) -> Self {
+        Self::custom(span, "Unclosed block comment")
+    }
+}
+
 /// Recognizer for a `// ...` line comment.
-fn line_comment<'src>(
-) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char, SimpleSpan>>> + Clone {
+fn line_comment<'src, E>() -> impl Parser<'src, &'src str, (), E> + Clone
+where
+    E: ParserExtra<'src, &'src str> + 'src,
+{
     let newline = line_ending();
 
     just("//")
@@ -222,8 +250,10 @@ fn line_comment<'src>(
 }
 
 /// Recognizer for different newline encodings (`Windows`: `\r\n`, `Unix`: `\n`, `Mac`: `\r`).
-fn line_ending<'src>(
-) -> impl Parser<'src, &'src str, LineEnding, extra::Err<Rich<'src, char, SimpleSpan>>> + Clone {
+fn line_ending<'src, E>() -> impl Parser<'src, &'src str, LineEnding, E> + Clone
+where
+    E: ParserExtra<'src, &'src str> + 'src,
+{
     choice((
         just("\r\n").to(LineEnding::CrLf),
         just("\n").to(LineEnding::Lf),
@@ -233,8 +263,10 @@ fn line_ending<'src>(
 
 /// Recognizer for whitespace.
 #[cfg(feature = "fmt")]
-fn whitespace<'src>(
-) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char, SimpleSpan>>> + Clone {
+fn whitespace<'src, E>() -> impl Parser<'src, &'src str, (), E> + Clone
+where
+    E: ParserExtra<'src, &'src str> + 'src,
+{
     any()
         .filter(|c: &char| c.is_whitespace() && *c != '\n' && *c != '\r')
         .repeated()
@@ -243,8 +275,10 @@ fn whitespace<'src>(
 }
 
 /// Recognizer for whitespace or a newline.
-fn whitespace_or_newline<'src>(
-) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char, SimpleSpan>>> + Clone {
+fn whitespace_or_newline<'src, E>() -> impl Parser<'src, &'src str, (), E> + Clone
+where
+    E: ParserExtra<'src, &'src str> + 'src,
+{
     any()
         .filter(|c: &char| c.is_whitespace())
         .repeated()
@@ -254,8 +288,11 @@ fn whitespace_or_newline<'src>(
 
 /// Recognizer for a (possibly nested) `/* ... */` block comment; an unterminated
 /// comment is reported and swallows the rest of the input.
-fn block_comment<'src>(
-) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char, SimpleSpan>>> + Clone {
+fn block_comment<'src, E>() -> impl Parser<'src, &'src str, (), E> + Clone
+where
+    E: ParserExtra<'src, &'src str> + 'src,
+    E::Error: LexError<'src>,
+{
     recursive(|block| {
         just("/*")
             .map_with(|_, e| e.span())
@@ -263,7 +300,7 @@ fn block_comment<'src>(
             .then(just("*/").or_not())
             .validate(|((open_span, ()), close), _span, emit| {
                 if close.is_none() {
-                    emit.emit(Rich::custom(open_span, "Unclosed block comment"));
+                    emit.emit(E::Error::unclosed_block_comment(open_span));
                 }
             })
     })
@@ -271,23 +308,30 @@ fn block_comment<'src>(
 
 /// One non-empty trivia item. Keeping this separate from [`trivia`] lets the
 /// ordinary lexer include trivia in the same recovery boundary as tokens.
-fn trivia_item<'src>(
-) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char, SimpleSpan>>> + Clone {
+fn trivia_item<'src, E>() -> impl Parser<'src, &'src str, (), E> + Clone
+where
+    E: ParserExtra<'src, &'src str> + 'src,
+    E::Error: LexError<'src>,
+{
     choice((line_comment(), block_comment(), whitespace_or_newline()))
 }
 
 /// Trivia — whitespace and comments — shared with the version-directive scanner
 /// (`version::SimcDirective::scan`) so the lexer and the scanner agree on comment
 /// syntax.
-pub(crate) fn trivia<'src>(
-) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char, SimpleSpan>>> {
+pub(crate) fn trivia<'src, E>() -> impl Parser<'src, &'src str, (), E>
+where
+    E: ParserExtra<'src, &'src str> + 'src,
+    E::Error: LexError<'src>,
+{
     trivia_item().repeated().ignored()
 }
 
 /// Parses the digit body of a numeric literal.
-fn digits_with_underscores<'src>(
-    radix: u32,
-) -> impl Parser<'src, &'src str, &'src str, extra::Err<Rich<'src, char, SimpleSpan>>> {
+fn digits_with_underscores<'src, E>(radix: u32) -> impl Parser<'src, &'src str, &'src str, E>
+where
+    E: ParserExtra<'src, &'src str> + 'src,
+{
     any()
         .filter(move |c: &char| c.is_digit(radix))
         .then(
@@ -306,8 +350,11 @@ fn digit_literal_text<const PRESERVE: bool>(input: &str) -> std::borrow::Cow<'_,
     }
 }
 
-fn to_token<'src, const PRESERVE: bool>(
-) -> impl Parser<'src, &'src str, Token<'src>, extra::Err<Rich<'src, char, SimpleSpan>>> {
+fn to_token<'src, const PRESERVE: bool, E>() -> impl Parser<'src, &'src str, Token<'src>, E>
+where
+    E: ParserExtra<'src, &'src str> + 'src,
+    E::Error: LabelError<'src, &'src str, TextExpected<'src, &'src str>>,
+{
     let num = || {
         digits_with_underscores(10).map(|s: &str| {
             let text = digit_literal_text::<PRESERVE>(s);
@@ -407,14 +454,16 @@ fn to_token<'src, const PRESERVE: bool>(
     choice((alpha, punct, nonzero_digit, zero))
 }
 
-pub fn lexer<'src>(
-) -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char, SimpleSpan>>>
+pub fn lexer<'src, E>() -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, E>
+where
+    E: ParserExtra<'src, &'src str> + 'src,
+    E::Error: LexError<'src> + LabelError<'src, &'src str, TextExpected<'src, &'src str>>,
 {
     const REMOVE_SEPARATORS: bool = false;
 
     let lexeme = choice((
         trivia_item().to(None),
-        to_token::<REMOVE_SEPARATORS>().map(Some),
+        to_token::<REMOVE_SEPARATORS, E>().map(Some),
     ))
     .map_with(|token, e| (token, e.span()))
     .recover_with(skip_then_retry_until(any().ignored(), end()));
@@ -429,11 +478,10 @@ pub fn lexer<'src>(
 
 #[cfg(feature = "fmt")]
 pub fn lexer_lossless<'src>(
-) -> impl Parser<'src, &'src str, Vec<Spanned<FmtToken<'src>>>, extra::Err<Rich<'src, char, SimpleSpan>>>
-{
+) -> impl Parser<'src, &'src str, Vec<Spanned<FmtToken<'src>>>, FullErr<'src>> {
     const PRESERVE_SEPARATORS: bool = true;
 
-    let token = to_token::<PRESERVE_SEPARATORS>().map(FmtToken::Token);
+    let token = to_token::<PRESERVE_SEPARATORS, FullErr<'src>>().map(FmtToken::Token);
 
     let newline = line_ending().map(Trivia::newline).map(FmtToken::Trivia);
     let whitespace = whitespace()
@@ -461,12 +509,40 @@ pub fn lexer_lossless<'src>(
 /// or `0`. Spans are reported relative to the full input.
 ///
 /// All comments, newlines, and spaces in the input code are discarded.
+/// Fast-path lexing errors: a span and the found token, nothing else.
+type BareErr<'src> = extra::Err<Simple<'src, char, SimpleSpan>>;
+/// Slow-path lexing errors, produced only when the fast path fails.
+type FullErr<'src> = extra::Err<Rich<'src, char, SimpleSpan>>;
+
 pub fn lex(
     file_id: usize,
     input: &str,
     start: usize,
 ) -> (Option<Tokens<'_>>, Vec<crate::error::Diagnostic>) {
-    let (tokens, lex_errors) = lexer().parse(&input[start..]).into_output_errors();
+    // Fast path: lex with bare errors (span and found token only), which skips
+    // Rich's expected-set accumulation for every alternative that fails along
+    // the way. The error type cannot influence the parse result, so a clean
+    // run is final.
+    let (tokens, lex_errors) = lexer::<BareErr>()
+        .parse(&input[start..])
+        .into_output_errors();
+    if lex_errors.is_empty() {
+        let mut diagnostics = Vec::new();
+        let tokens = tokens.map(|vec| {
+            vec.into_iter()
+                .filter_map(|(tok, span)| {
+                    filter_token_bare(tok, span, &mut diagnostics, file_id, start)
+                })
+                .collect()
+        });
+        return (tokens, diagnostics);
+    }
+
+    // Error path: re-lex with Rich errors and report those; the diagnostics
+    // are identical to always having lexed with Rich.
+    let (tokens, lex_errors) = lexer::<FullErr>()
+        .parse(&input[start..])
+        .into_output_errors();
     let shift = |span| Span::from_chumsky(file_id, span, start);
 
     let mut diagnostics: Vec<Diagnostic> = lex_errors
@@ -490,6 +566,20 @@ pub fn lex(
     (tokens, diagnostics)
 }
 
+/// [`filter_token`] for the fast path, which has no `SimpleSpan` conversion
+/// closure at hand. Equivalent behavior.
+fn filter_token_bare<'src>(
+    tok: Token<'src>,
+    span: SimpleSpan,
+    diagnostics: &mut Vec<Diagnostic>,
+    file_id: usize,
+    start: usize,
+) -> Option<(Token<'src>, Span)> {
+    filter_token(tok, span, diagnostics, |span| {
+        Span::from_chumsky(file_id, span, start)
+    })
+}
+
 /// Lexes an input string into a lossles stream of tokens with spans, beginning at byte
 /// offset `start` — the end of the version directive per `SimcDirective::prescan`,
 /// or `0`. Spans are reported relative to the full input.
@@ -509,7 +599,7 @@ pub fn lex_lossless(
         .map(|err| {
             Diagnostic::new(
                 Error::CannotParse {
-                    msg: err.reason().to_string(),
+                    msg: err.to_string(),
                 },
                 shift(*err.span()),
             )
@@ -566,8 +656,13 @@ mod original_lexer {
 
     fn lex<'src>(
         input: &'src str,
-    ) -> (Option<Vec<Token<'src>>>, Vec<Rich<'src, char, SimpleSpan>>) {
-        let (tokens, errors) = lexer().parse(input).into_output_errors();
+    ) -> (
+        Option<Vec<Token<'src>>>,
+        Vec<Simple<'src, char, SimpleSpan>>,
+    ) {
+        let (tokens, errors) = lexer::<extra::Err<Simple<char, SimpleSpan>>>()
+            .parse(input)
+            .into_output_errors();
         let tokens = tokens.map(|vec| {
             vec.into_iter()
                 .map(|(tok, _)| tok.clone())
@@ -575,6 +670,29 @@ mod original_lexer {
         });
         (tokens, errors)
     }
+
+    #[test]
+    fn error_path_reports_rich_diagnostics() {
+        // The two-phase lex: a clean Simple run is final, but any lex error
+        // re-runs with Rich errors, so public diagnostics keep the rich
+        // message shapes.
+        let (tokens, diagnostics) = super::lex(0, "/* unclosed", 0);
+        assert!(tokens.is_some());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .to_string()
+                .contains("Unclosed block comment"),
+            "expected the rich message, got: {diagnostics:?}"
+        );
+
+        let (_, diagnostics) = super::lex(0, "fn main() {} @", 0);
+        assert!(
+            diagnostics[0].to_string().contains("expected"),
+            "expected an expected-items enumeration, got: {diagnostics:?}"
+        );
+    }
+
     #[test]
     fn test_block_comment_simple() {
         let input = "/* hello world */";
@@ -625,7 +743,8 @@ mod original_lexer {
         let err = &errors[0];
         assert_eq!(err.span().start, 0);
         assert_eq!(err.span().end, 2);
-        assert_eq!(err.to_string(), "Unclosed block comment");
+        // Simple errors carry span and found only: no custom reason.
+        assert_eq!(err.to_string(), "found end of input at 0..2");
 
         assert_eq!(tokens, Some(vec![]));
     }
@@ -647,11 +766,11 @@ mod original_lexer {
 
         assert_eq!(errors.len(), 2);
 
+        // Simple errors carry span and found only: no custom reason.
         assert_eq!(errors[0].span().start, 9);
-        assert_eq!(errors[0].to_string(), "Unclosed block comment");
+        assert_eq!(errors[0].to_string(), "found end of input at 9..11");
 
         assert_eq!(errors[1].span().start, 0);
-        assert_eq!(errors[1].to_string(), "Unclosed block comment");
 
         assert_eq!(tokens, Some(vec![]));
     }
@@ -675,7 +794,8 @@ mod original_lexer {
             1,
             "comment contents must not be retried as code"
         );
-        assert!(errors[0].to_string().contains("found '@' expected"));
+        // Simple's Display double-quotes found tokens (a quirk): ''@''.
+        assert!(errors[0].to_string().contains('@'));
         assert_eq!(
             tokens,
             Some(vec![
@@ -831,7 +951,9 @@ mod original_lexer {
         // Check if the lexer parses the example file without errors.
         let src = include_str!("../examples/last_will.simf");
 
-        let (tokens, lex_errs) = lexer().parse(src).into_output_errors();
+        let (tokens, lex_errs) = lexer::<extra::Err<Simple<char, SimpleSpan>>>()
+            .parse(src)
+            .into_output_errors();
         let _ = tokens.unwrap();
 
         assert!(lex_errs.is_empty());
@@ -977,6 +1099,7 @@ mod fmt_lexer {
         let err = &errors[0];
         assert_eq!(err.span().start, 0);
         assert_eq!(err.span().end, 2);
+        // Simple errors carry span and found only: no custom reason.
         assert_eq!(err.to_string(), "Unclosed block comment");
 
         assert_eq!(
@@ -1005,11 +1128,11 @@ mod fmt_lexer {
 
         assert_eq!(errors.len(), 2);
 
+        // Simple errors carry span and found only: no custom reason.
         assert_eq!(errors[0].span().start, 9);
         assert_eq!(errors[0].to_string(), "Unclosed block comment");
 
         assert_eq!(errors[1].span().start, 0);
-        assert_eq!(errors[1].to_string(), "Unclosed block comment");
 
         assert_eq!(
             tokens,
@@ -1050,7 +1173,8 @@ mod fmt_lexer {
         let (tokens, errors) = lex_lossless(input);
 
         assert_eq!(errors.len(), 1, "only the invalid character is an error");
-        assert!(errors[0].to_string().contains("found '@' expected"));
+        // Simple's Display double-quotes found tokens (a quirk): ''@''.
+        assert!(errors[0].to_string().contains('@'));
 
         let tokens = tokens.expect("recovery keeps the lossless stream");
         assert!(matches!(
