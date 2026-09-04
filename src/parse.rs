@@ -37,6 +37,11 @@ use crate::TemplateProgramWitness;
 #[cfg(feature = "fmt")]
 use crate::lexer::{FmtToken, FmtTokens};
 
+// The generated bare-error fast-path parser copy; a child module so it can
+// construct the private AST fields exactly like the rich parser above does.
+#[path = "parse_bare.rs"]
+mod bare;
+
 /// A program is a sequence of items.
 #[derive(Clone, Debug)]
 pub struct Program {
@@ -1662,10 +1667,6 @@ impl_parse_wrapped_string!(Identifier, "identifier");
 impl_parse_wrapped_string!(AliasName, "alias name");
 impl_parse_wrapped_string!(ModuleName, "module name");
 
-trait AstNode: ChumskyParse + crate::unstable::RequireFeature + std::fmt::Debug {}
-
-impl<T> AstNode for T where T: ChumskyParse + crate::unstable::RequireFeature + std::fmt::Debug {}
-
 /// Copy of [`FromStr`] that internally uses the `chumsky` parser.
 pub trait ParseFromStr: Sized {
     /// Parse a value from the string `s`.
@@ -1807,7 +1808,12 @@ impl<A: ChumskyParse + std::fmt::Debug> ParseFromStr for A {
     }
 }
 
-impl<A: AstNode> ParseFromStrWithErrors for A {
+// Two-phase parse for the whole-program entry point (every production caller
+// parses a `Program`): first parse with the bare-error copy in [`bare`],
+// whose errors are only a signal to re-parse. The bare run is final when
+// clean, since the error type cannot influence the parse result; on any
+// error the rich-error parser runs and produces the diagnostics.
+impl ParseFromStrWithErrors for Program {
     fn parse_from_str_with_errors(
         file_id: usize,
         content: &str,
@@ -1824,7 +1830,14 @@ impl<A: AstNode> ParseFromStrWithErrors for A {
 
         let tokens = tokens?;
 
-        let (ast, parse_status) = pipeline::parse_ast::<A>(file_id, content, tokens, diagnostics);
+        let (ast, parse_status) = match bare::parse_program(file_id, content, &tokens) {
+            Some(program) => (Some(program), true),
+            None => {
+                let (ast, parse_status) =
+                    pipeline::parse_ast::<Program>(file_id, content, tokens, diagnostics);
+                (ast, parse_status)
+            }
+        };
 
         if lex_ok && parse_status {
             let () = pipeline::post_check(unstable_features, ast.as_ref(), diagnostics);
