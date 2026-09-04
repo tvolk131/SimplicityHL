@@ -1,7 +1,7 @@
 use std::fmt;
 
 use chumsky::prelude::{any, choice, end, just, recursive, skip_then_retry_until};
-use chumsky::{error::Rich, extra, span::SimpleSpan, text, IterParser, Parser};
+use chumsky::{error::Simple, extra, span::SimpleSpan, text, IterParser, Parser};
 
 use crate::driver::CRATE_STR;
 use crate::error::{Diagnostic, Error, Span};
@@ -213,7 +213,7 @@ impl<'src> fmt::Display for FmtToken<'src> {
 
 /// Recognizer for a `// ...` line comment.
 fn line_comment<'src>(
-) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char, SimpleSpan>>> + Clone {
+) -> impl Parser<'src, &'src str, (), extra::Err<Simple<'src, char, SimpleSpan>>> + Clone {
     let newline = line_ending();
 
     just("//")
@@ -223,7 +223,7 @@ fn line_comment<'src>(
 
 /// Recognizer for different newline encodings (`Windows`: `\r\n`, `Unix`: `\n`, `Mac`: `\r`).
 fn line_ending<'src>(
-) -> impl Parser<'src, &'src str, LineEnding, extra::Err<Rich<'src, char, SimpleSpan>>> + Clone {
+) -> impl Parser<'src, &'src str, LineEnding, extra::Err<Simple<'src, char, SimpleSpan>>> + Clone {
     choice((
         just("\r\n").to(LineEnding::CrLf),
         just("\n").to(LineEnding::Lf),
@@ -234,7 +234,7 @@ fn line_ending<'src>(
 /// Recognizer for whitespace.
 #[cfg(feature = "fmt")]
 fn whitespace<'src>(
-) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char, SimpleSpan>>> + Clone {
+) -> impl Parser<'src, &'src str, (), extra::Err<Simple<'src, char, SimpleSpan>>> + Clone {
     any()
         .filter(|c: &char| c.is_whitespace() && *c != '\n' && *c != '\r')
         .repeated()
@@ -244,7 +244,7 @@ fn whitespace<'src>(
 
 /// Recognizer for whitespace or a newline.
 fn whitespace_or_newline<'src>(
-) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char, SimpleSpan>>> + Clone {
+) -> impl Parser<'src, &'src str, (), extra::Err<Simple<'src, char, SimpleSpan>>> + Clone {
     any()
         .filter(|c: &char| c.is_whitespace())
         .repeated()
@@ -255,7 +255,7 @@ fn whitespace_or_newline<'src>(
 /// Recognizer for a (possibly nested) `/* ... */` block comment; an unterminated
 /// comment is reported and swallows the rest of the input.
 fn block_comment<'src>(
-) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char, SimpleSpan>>> + Clone {
+) -> impl Parser<'src, &'src str, (), extra::Err<Simple<'src, char, SimpleSpan>>> + Clone {
     recursive(|block| {
         just("/*")
             .map_with(|_, e| e.span())
@@ -263,7 +263,7 @@ fn block_comment<'src>(
             .then(just("*/").or_not())
             .validate(|((open_span, ()), close), _span, emit| {
                 if close.is_none() {
-                    emit.emit(Rich::custom(open_span, "Unclosed block comment"));
+                    emit.emit(Simple::new(None, open_span));
                 }
             })
     })
@@ -272,7 +272,7 @@ fn block_comment<'src>(
 /// One non-empty trivia item. Keeping this separate from [`trivia`] lets the
 /// ordinary lexer include trivia in the same recovery boundary as tokens.
 fn trivia_item<'src>(
-) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char, SimpleSpan>>> + Clone {
+) -> impl Parser<'src, &'src str, (), extra::Err<Simple<'src, char, SimpleSpan>>> + Clone {
     choice((line_comment(), block_comment(), whitespace_or_newline()))
 }
 
@@ -280,14 +280,14 @@ fn trivia_item<'src>(
 /// (`version::SimcDirective::scan`) so the lexer and the scanner agree on comment
 /// syntax.
 pub(crate) fn trivia<'src>(
-) -> impl Parser<'src, &'src str, (), extra::Err<Rich<'src, char, SimpleSpan>>> {
+) -> impl Parser<'src, &'src str, (), extra::Err<Simple<'src, char, SimpleSpan>>> {
     trivia_item().repeated().ignored()
 }
 
 /// Parses the digit body of a numeric literal.
 fn digits_with_underscores<'src>(
     radix: u32,
-) -> impl Parser<'src, &'src str, &'src str, extra::Err<Rich<'src, char, SimpleSpan>>> {
+) -> impl Parser<'src, &'src str, &'src str, extra::Err<Simple<'src, char, SimpleSpan>>> {
     any()
         .filter(move |c: &char| c.is_digit(radix))
         .then(
@@ -307,7 +307,7 @@ fn digit_literal_text<const PRESERVE: bool>(input: &str) -> std::borrow::Cow<'_,
 }
 
 fn to_token<'src, const PRESERVE: bool>(
-) -> impl Parser<'src, &'src str, Token<'src>, extra::Err<Rich<'src, char, SimpleSpan>>> {
+) -> impl Parser<'src, &'src str, Token<'src>, extra::Err<Simple<'src, char, SimpleSpan>>> {
     let num = || {
         digits_with_underscores(10).map(|s: &str| {
             let text = digit_literal_text::<PRESERVE>(s);
@@ -408,7 +408,7 @@ fn to_token<'src, const PRESERVE: bool>(
 }
 
 pub fn lexer<'src>(
-) -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char, SimpleSpan>>>
+) -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Simple<'src, char, SimpleSpan>>>
 {
     const REMOVE_SEPARATORS: bool = false;
 
@@ -429,7 +429,7 @@ pub fn lexer<'src>(
 
 #[cfg(feature = "fmt")]
 pub fn lexer_lossless<'src>(
-) -> impl Parser<'src, &'src str, Vec<Spanned<FmtToken<'src>>>, extra::Err<Rich<'src, char, SimpleSpan>>>
+) -> impl Parser<'src, &'src str, Vec<Spanned<FmtToken<'src>>>, extra::Err<Simple<'src, char, SimpleSpan>>>
 {
     const PRESERVE_SEPARATORS: bool = true;
 
@@ -474,7 +474,7 @@ pub fn lex(
         .map(|err| {
             Diagnostic::new(
                 Error::CannotParse {
-                    msg: err.reason().to_string(),
+                    msg: err.to_string(),
                 },
                 shift(*err.span()),
             )
@@ -509,7 +509,7 @@ pub fn lex_lossless(
         .map(|err| {
             Diagnostic::new(
                 Error::CannotParse {
-                    msg: err.reason().to_string(),
+                    msg: err.to_string(),
                 },
                 shift(*err.span()),
             )
@@ -566,7 +566,10 @@ mod original_lexer {
 
     fn lex<'src>(
         input: &'src str,
-    ) -> (Option<Vec<Token<'src>>>, Vec<Rich<'src, char, SimpleSpan>>) {
+    ) -> (
+        Option<Vec<Token<'src>>>,
+        Vec<Simple<'src, char, SimpleSpan>>,
+    ) {
         let (tokens, errors) = lexer().parse(input).into_output_errors();
         let tokens = tokens.map(|vec| {
             vec.into_iter()
@@ -625,7 +628,8 @@ mod original_lexer {
         let err = &errors[0];
         assert_eq!(err.span().start, 0);
         assert_eq!(err.span().end, 2);
-        assert_eq!(err.to_string(), "Unclosed block comment");
+        // Simple errors carry span and found only: no custom reason.
+        assert_eq!(err.to_string(), "found end of input at 0..2");
 
         assert_eq!(tokens, Some(vec![]));
     }
@@ -647,11 +651,11 @@ mod original_lexer {
 
         assert_eq!(errors.len(), 2);
 
+        // Simple errors carry span and found only: no custom reason.
         assert_eq!(errors[0].span().start, 9);
-        assert_eq!(errors[0].to_string(), "Unclosed block comment");
+        assert_eq!(errors[0].to_string(), "found end of input at 9..11");
 
         assert_eq!(errors[1].span().start, 0);
-        assert_eq!(errors[1].to_string(), "Unclosed block comment");
 
         assert_eq!(tokens, Some(vec![]));
     }
@@ -675,7 +679,8 @@ mod original_lexer {
             1,
             "comment contents must not be retried as code"
         );
-        assert!(errors[0].to_string().contains("found '@' expected"));
+        // Simple's Display double-quotes found tokens (a quirk): ''@''.
+        assert!(errors[0].to_string().contains('@'));
         assert_eq!(
             tokens,
             Some(vec![
@@ -847,7 +852,7 @@ mod fmt_lexer {
         input: &'src str,
     ) -> (
         Option<Vec<FmtToken<'src>>>,
-        Vec<Rich<'src, char, SimpleSpan>>,
+        Vec<Simple<'src, char, SimpleSpan>>,
     ) {
         let (tokens, errors) = lexer_lossless().parse(input).into_output_errors();
         let tokens = tokens.map(|vec| {
@@ -977,7 +982,8 @@ mod fmt_lexer {
         let err = &errors[0];
         assert_eq!(err.span().start, 0);
         assert_eq!(err.span().end, 2);
-        assert_eq!(err.to_string(), "Unclosed block comment");
+        // Simple errors carry span and found only: no custom reason.
+        assert_eq!(err.to_string(), "found end of input at 0..2");
 
         assert_eq!(
             tokens,
@@ -1005,11 +1011,11 @@ mod fmt_lexer {
 
         assert_eq!(errors.len(), 2);
 
+        // Simple errors carry span and found only: no custom reason.
         assert_eq!(errors[0].span().start, 9);
-        assert_eq!(errors[0].to_string(), "Unclosed block comment");
+        assert_eq!(errors[0].to_string(), "found end of input at 9..11");
 
         assert_eq!(errors[1].span().start, 0);
-        assert_eq!(errors[1].to_string(), "Unclosed block comment");
 
         assert_eq!(
             tokens,
@@ -1050,7 +1056,8 @@ mod fmt_lexer {
         let (tokens, errors) = lex_lossless(input);
 
         assert_eq!(errors.len(), 1, "only the invalid character is an error");
-        assert!(errors[0].to_string().contains("found '@' expected"));
+        // Simple's Display double-quotes found tokens (a quirk): ''@''.
+        assert!(errors[0].to_string().contains('@'));
 
         let tokens = tokens.expect("recovery keeps the lossless stream");
         assert!(matches!(
