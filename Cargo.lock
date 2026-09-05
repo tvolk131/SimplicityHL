@@ -720,7 +720,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "simplicity-lang"
 version = "0.8.0"
-source = "git+https://github.com/tvolk131/rust-simplicity.git?branch=accel/sha256-aarch64#416d606450ce4adc81e8231fa7cc13f774f12bdd"
+source = "git+https://github.com/tvolk131/rust-simplicity.git?branch=perf/lazy-amr#5f448595a8f02632affc6391d2492d2e18a7de02"
 dependencies = [
  "bitcoin",
  "bitcoin_hashes",
@@ -736,7 +736,7 @@ dependencies = [
 [[package]]
 name = "simplicity-sys"
 version = "0.7.0"
-source = "git+https://github.com/tvolk131/rust-simplicity.git?branch=accel/sha256-aarch64#416d606450ce4adc81e8231fa7cc13f774f12bdd"
+source = "git+https://github.com/tvolk131/rust-simplicity.git?branch=perf/lazy-amr#5f448595a8f02632affc6391d2492d2e18a7de02"
 dependencies = [
  "bitcoin_hashes",
  "cc",
