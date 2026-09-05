@@ -482,10 +482,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
+]
 
 [[package]]
 name = "miniscript"
@@ -720,7 +738,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "simplicity-lang"
 version = "0.8.0"
-source = "git+https://github.com/tvolk131/rust-simplicity.git?branch=perf/lazy-amr#5f448595a8f02632affc6391d2492d2e18a7de02"
+source = "git+https://github.com/tvolk131/rust-simplicity.git?branch=perf/serialize#aa77ac55b6726319d04df5bf925bfa1e07ee6bd6"
 dependencies = [
  "bitcoin",
  "bitcoin_hashes",
@@ -736,7 +754,7 @@ dependencies = [
 [[package]]
 name = "simplicity-sys"
 version = "0.7.0"
-source = "git+https://github.com/tvolk131/rust-simplicity.git?branch=perf/lazy-amr#5f448595a8f02632affc6391d2492d2e18a7de02"
+source = "git+https://github.com/tvolk131/rust-simplicity.git?branch=perf/serialize#aa77ac55b6726319d04df5bf925bfa1e07ee6bd6"
 dependencies = [
  "bitcoin_hashes",
  "cc",
@@ -754,6 +772,7 @@ dependencies = [
  "either",
  "getrandom 0.2.17",
  "itertools",
+ "mimalloc",
  "miniscript",
  "semver",
  "serde",
