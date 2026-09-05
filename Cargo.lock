@@ -738,7 +738,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "simplicity-lang"
 version = "0.8.0"
-source = "git+https://github.com/tvolk131/rust-simplicity.git?branch=perf/serialize#aa77ac55b6726319d04df5bf925bfa1e07ee6bd6"
+source = "git+https://github.com/tvolk131/rust-simplicity.git?branch=perf/cmr-sharing#db2ac51f3cc95df1ec708a4befb14cc0aee0ee27"
 dependencies = [
  "bitcoin",
  "bitcoin_hashes",
@@ -754,7 +754,7 @@ dependencies = [
 [[package]]
 name = "simplicity-sys"
 version = "0.7.0"
-source = "git+https://github.com/tvolk131/rust-simplicity.git?branch=perf/serialize#aa77ac55b6726319d04df5bf925bfa1e07ee6bd6"
+source = "git+https://github.com/tvolk131/rust-simplicity.git?branch=perf/cmr-sharing#db2ac51f3cc95df1ec708a4befb14cc0aee0ee27"
 dependencies = [
  "bitcoin_hashes",
  "cc",
